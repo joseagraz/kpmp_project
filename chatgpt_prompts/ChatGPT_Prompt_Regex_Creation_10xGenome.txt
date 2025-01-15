@@ -1,0 +1,70 @@
+you are a python coder and an expert in string parsing. below is a list of files, please, provide a regex that groups the text in the file names with the following patterns. Test regex against file name list and provide a string clearly showing the resulting regex in a single string
+Patterns:
+-Starts with a series of 36 characters ending with "_". Then a series of unimportant character
+-groups of interest are defined as "S*","L*", "I*",and "R*", where * is 1 to 3 digits
+-groups "S*", "R*", "L*" may or may not exist, where * is 1 to 3 digits
+-groups defined as "S*","L*", and "R*" are character is case sensitive, where * is 1 to 3 digits
+-Group "R*" may or may not be followed by "-V*", where * is 1 to 3 digits, and V is case insensitive, where * is 1 to 3 digits 
+-Group "R*" may or may not be led by any of these characters: ".", "_", where * is 1 to 3 digits 
+-Group "R*" may or may not be followed by any of these characters: ".", "_", where * is 1 to 3 digits 
+-When "L*" group present, Group "L*" may or may not be between "S*" and "R*", where * is 1 to 3 digits 
+-When "L*" group present, Group "S*" always before group "L*", where * is 1 to 3 digits
+-When "L*" group present, Group "R*" always after group "L*", where * is 1 to 3 digits
+-When "I*" group present, Group "S*" always before group "L*" followed by "I*", where * is 1 to 3 digits
+-When "S*" group present, group "S*" starts and ends with "_", where * is 1 to 3 digits
+-When "R*" group present, group "R*" may or may not start and end with "." or "_", where * is 1 to 3 digits
+-When "R*" group present without "S*", group "R*" may follow with "_" and 3 digits, where * is 1 to 3 digits
+-When "R*" group present without "S*", group "R*" may follow with ".fastq.gz", where * is 1 to 3 digits
+-When "R*" group present, without "S*","L*",  or "I*" groups may be missing, where * is 1 to 3 digits
+-If text "_all_"  is present, then sequence will be: "S*" group, "_all_", "R*" group, where * is 1 to 3 digits
+- A possible sequence is "$S*_R*_*.fastq.gz", where $ is  a series of 27 unimportant characters and * is 1 to 3 digits
+-XOR "I*" and  "R*" groups, where * is 1 to 3 digits
+-Always ends with the text "fastq.gz" 
+-"fastq.gz" may or may not have a 3 digit prefix followed by "."
+
+file name list: 
+3444-EO-4_CGTCCACC-GTCATGAA_S95_R1_001.fastq.gz
+1225321e-1b3e-4593-a312-ee8d58bbb278_S-1905-017555_KL-0014317c_R1.fastq.gz
+411489ca-13ca-44b1-ada2-d4df57e66ad2_10-06_19-0001_DCT_S24_all_R2_001.fastq.gz
+2cce6996-cb92-46d4-b277-68a33898530c_5655-EO-2_TAGCATAGTG-GACAGAGCCG_S37_R1_001.fastq.gz
+1b84fef3-3e7b-4eaa-a484-d94d0ca4bfdf_5655-EO-4_CACGGTGAAT-TGTGACGAAC_S39_R1_001.fastq.gz
+4f3fb5b1-598c-4aea-acb3-8522be67f54e_5655-EO-5_ATGGCTTGTG-CACAACATTC_S40_R2_001.fastq.gz
+885c8af1-84f6-4c55-a46a-86bf05b05a04_5655-EO-5_ATGGCTTGTG-CACAACATTC_S40_R1_001.fastq.gz
+d4d7110a-4ea9-47b3-a339-d8dd34c7ee8e_6034-EO-2_AGTTTCCT-CTGTGTGG_S83_R2_001.fastq.gz
+14e285c3-2404-42a6-83eb-9e85224af159_6034-EO-3_GTAGCCCT-ATAGATGC_S84_R1_001.fastq.gz
+c13e633f-1010-43a7-b61c-fa5c99b53840_6034-EO-4_TCGGCTCT-AGACCATC_S85_R2_001.fastq.gz
+f8d99091-43cb-4581-855d-1b0a190892c0_6432-EO-4_GAGACGCACG-ATGTTCATAG_S34_R2_001.fastq.gz
+06db803d-a9bc-4a63-bf45-77453ee84248_6415-EO-4_CGAATATTCG-TTGCTTCCAG_S25_R2_001.fastq.gz
+0fa03891-a5cc-400d-873a-f7e2a0d180f5_KPMP_20220217F_10X-R_S29_L003_R1_001.fastq.gz
+f5ad1341-d081-4f59-9286-af1bbfa0edfe_KPMP_20220217C_10X-R_S1_L004_R1_001.fastq.gz
+e71df7c7-d005-4075-8456-97447b8e8d01_KPMP_20220217G_10X-R_S4_L004_R1_001.fastq.gz
+4e45da05-38a2-4774-a353-815587d04ac0_PRE_019_4_30min_S32_L000_R1_001.fastq.gz
+8568b2aa-853c-462d-9600-5e423127f66b_KPMP_20220217B_10X-R_S28_L003_R2_001.fastq.gz
+bc2991da-6106-4b8e-932e-065e85a7d359_KPMP_20220217B_10X-R_S28_L003_R1_001.fastq.gz
+edef90e4-b0b9-4e5f-a9f1-d6435c5b4809_KPMP_20220217C_10X-R_S1_L004_R2_001.fastq.gz
+564a2603-f412-4503-ab90-c71a90ba1d51_1158-EO-2_S208_L000_R2_001.fastq.gz
+27eb68a1-e6a4-4d60-84d1-a7609de38be3_1158-EO-2_S207_L000_R2_001.fastq.gz
+cf0ab6af-7943-4f22-ba45-9b9478716afd_1158-EO-2_S207_L000_R1_001.fastq.gz
+4be95dfe-3ccd-4a39-88e3-783db7fc3db0_KPMP_20220217E_10X-R_S3_L004_R2_001.fastq.gz
+dfcb6735-acb6-4792-8054-f9bb11ddfd58_1158-EO-3_S214_L000_R1_001.fastq.gz
+c90d8eac-447f-4ade-bb52-900c7b41f6c2_1158-EO-3_S212_L000_R1_001.fastq.gz
+2c063cf0-0d00-45a4-ad3f-b9a1eefedc7a_PRE_062_1_S36_L001_R1_001.fastq.gz
+c95130c4-ebb0-4a7c-aabd-2332f491cebe_BUKMAP_20191010_10X-R_B3B_SI-GA-G7_S20_L004_R2_001.fastq.gz
+90fb985b-8cd1-4c31-b8c8-1b7d92c9ec37_BUKMAP_20191010_10X-R_B3B_SI-GA-G7_S20_L004_R1_001.fastq.gz
+fce821f4-f82f-4267-b8d5-94c9095bd4d0_BUKMAP_20191010_10X-R_B3B_SI-GA-G7_S17_L004_R2_001.fastq.gz
+f14be057-66b9-4f22-951e-dc521966f7d8_1153-EO-3_S56_R1_001.fastq.gz
+08cb8a72-5be3-4a80-82fc-de80a658551c_1153-EO-3_S55_R2_001.fastq.gz
+e593cdc9-7bbe-4853-b1f1-0a836b6df400_1153-EO-3_S55_R1_001.fastq.gz
+
+# Regex pattern based on the given conditions
+pattern = r'^.{36}.*?(?:_S(\d{1,3}))?(?:_L(\d{1,3}))?(?:_I(\d{1,3}))?(?:[._]?R(\d{1,3})(?:-V\d{1,3})?[._]?)?(?:_\d{3})?\.fastq\.gz$'
+
+The regular expression (regex) below works well, but this regex is still parsing R incorrectly. Please, modify the regex below to fit the testing strings
+regex: 
+^.{36}.*?(?:_(S\d{1,3}))?(?:_all_)?(?:_(L\d{1,3}))?(?:_(I\d{1,3}))?(?:[._]?(R\d{1,3})(?:-V\d{1,3})?[._]?)?_(\d{3})?\.fastq\.gz$
+testing strings:
+aed99a89-a078-448b-9a11-c7fcdd8738b3_S-1908-009836_KL-0014953_R1.fastq.gz
+e4dc15f8-e021-4226-a748-974af9db4c51_S-1908-009836_KL-0014953_R2.fastq.gz
+
+# Modified regex pattern based on the given conditions
+pattern = r'^.{36}.*?(?:_(S\d{1,3}))?(?:_all_)?(?:_(L\d{1,3}))?(?:_(I\d{1,3}))?(?:[._]?(R\d{1,3})(?:-V\d{1,3})?)?(_\d{3})?\.fastq\.gz$'

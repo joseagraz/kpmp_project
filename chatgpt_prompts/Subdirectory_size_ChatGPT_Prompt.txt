@@ -1,0 +1,11 @@
+you are a linux expert and the best bash shell programmer. Provide well documented code that does the following:
+1) sums the total size of files in all the subdirectories, none recursive. 
+3)do not count files that have the word "bam" in the file name
+4) disregard empty subdirectories
+5) calculate a histogram of subdirectories sizes
+6) in the image histogram, replace the subdirectory names in the x-axis for a integer starting at 1
+
+input: starting directory
+text output 2: minimum size and directory name
+text output 4: maximum size  and directory name
+image output 5: histogram 
