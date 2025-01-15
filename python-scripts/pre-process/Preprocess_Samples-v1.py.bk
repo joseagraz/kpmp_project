@@ -1,0 +1,658 @@
+"""
+Preprocess Samples Script for Single-Cell Genomic Data
+
+This script is designed to preprocess single-cell genomic data. It includes functionalities for doublet detection, gene filtering, data cleaning, and more, utilizing libraries such as Scanpy, Pandas, NumPy, and Scrublet.
+
+Usage:
+    Ensure all dependencies are installed and the dataset is properly formatted as per the requirements of the used libraries.
+    Run the script in an environment where the necessary Python packages are installed.
+
+Author: Jose L. Agraz and Parker Wilson
+Date: Feb 23, 2024
+Version: 1.0
+"""
+from typing import Tuple
+from typing import List
+from pandas import DataFrame
+import scanpy as sc
+import pandas as pd
+from matplotlib.pyplot import rc_context
+import numpy as np
+from pathlib import Path
+import scvi
+import logging
+import concurrent.futures
+import csv
+import os
+import torch
+import tempfile
+from collections import Counter
+import seaborn as sns
+import time
+import scrublet as scr
+from scipy.sparse import csr_matrix
+from datetime import datetime
+from anndata import (
+    AnnData,
+    read_csv,
+    read_text,
+    read_excel,
+    read_mtx,
+    read_loom,
+    read_hdf,
+)
+# ------------------------------------------
+# reference: 
+# Complete single-cell RNAseq analysis walkthrough | Advanced introduction
+# https://www.youtube.com/watch?v=uvyG9yLuNSE&t=635s
+# ------------------------------------------
+sc.set_figure_params(dpi=100)
+torch.set_float32_matmul_precision("high")
+# 12TB disk path
+root_path              = Path('/media/jagraz/12TB_Disk/KPMP_Data/Privately_Available_Data')
+root_path              = Path('/media/jagraz/3T_USB')
+# NAS path
+# root_path            = Path('/media/jagraz/KPMP_Data/Privately_Available_Data')
+support_files_dir      = 'Supporting_Files'
+data_dir               = 'Original_Download_KPMP_S3_Bucket_Oct_16_2023'
+results_dir            = 'Results'
+sample_name            = '0a8d4f18-84ca-4593-af16-3aaf605ca328'
+source_data_path       = Path('cellranger_output/outs/filtered_feature_bc_matrix')
+data_location          = root_path / Path(data_dir) / Path(sample_name) / source_data_path
+MODEL_DIR              = root_path / Path(results_dir) / "scVI-model"
+ADATA_FILE_PATH        = root_path / Path(results_dir) / "175_samples.h5ad"
+CVS_FILE_PATH          = root_path / Path(support_files_dir) / 'list_of_removals.csv'
+RIBO_LOOKUP_FILE_PATH  = root_path / Path(support_files_dir) / 'KEGG_RIBOSOME.v2023.2.Hs.txt'
+KPMP_EXCEL_LEGEND_PATH = root_path / Path(support_files_dir) / Path('Excel_Files') / 'Parker_Wilson_PennMed_Update_V2.xlsx'
+# Testing
+# samples_of_interest = root_path / Path(support_files_dir) / 'list_of_samples_processed_using_cellranger_short_list.txt'
+# Full list
+SAMPLES_OF_INTEREST_DIR = root_path / Path(data_dir)
+SCVI_LATENT_KEY         = "X_scVI"
+DOUBLETS                = 'doublet'
+KPMP_EXCEL_COLUMN_NAMES = ['Participant ID',
+                           'Protocol_x',
+                           'Sample Type_x',
+                           'Tissue Type_x',
+                           'Experimental Strategy',
+                           'Data Format',
+                           'Platform',
+                           'Data Type',
+                           'Size',
+                           'File Name',
+                           'Internal Package ID',
+                           'uuid',
+                           'filename',
+                           '2',
+                           'checksum',
+                           'Status',
+                           'Tissue Source',
+                           'Protocol_y',
+                           'Sample Type_y',
+                           'Tissue Type_y',
+                           'Sex',
+                           'Age (Years) (Binned)',
+                           'Race',
+                           'KDIGO Stage',
+                           'Baseline eGFR (ml/min/1.73m2) (Binned)',
+                           'Proteinuria (mg) (Binned)',
+                           'A1c (%) (Binned)']
+# ------------------------------------------
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s',
+                    handlers=[logging.FileHandler("processing.log"), logging.StreamHandler()])
+# ------------------------------------------
+def detect_doublets(adata: AnnData, expected_doublet_rate: float = 0.06) -> AnnData:
+    """
+    Detects doublets in single-cell RNA-seq data using the Scrublet tool.
+
+    This function applies the Scrublet algorithm to identify doublet (dual-cell) signatures within the provided AnnData object. It calculates doublet scores for each cell, predicts doublets, and annotates the input AnnData object with these predictions.
+
+    Parameters:
+    - adata (AnnData): The AnnData object containing single-cell RNA-seq data to be analyzed.
+    - expected_doublet_rate (float, optional): The expected doublet rate in the dataset. It is used by Scrublet to adjust its sensitivity. Default is 0.06.
+
+    Returns:
+    - AnnData: The input AnnData object is returned after appending the 'doublet_scores' and 'predicted_doublets' to its `.obs` attribute. The 'doublet_scores' column contains the computed doublet scores for each cell, while the 'predicted_doublets' column contains boolean values indicating predicted doublet status.
+
+    Note:
+    - It's important to have Scrublet installed in your environment to use this function (`pip install scrublet`).
+    - The function modifies the input AnnData object in-place by adding new columns to its `.obs` dataframe.
+    """
+    # Initialize a Scrublet object with the expected doublet rate
+    scrub = scr.Scrublet(adata.X, expected_doublet_rate=expected_doublet_rate)
+
+    # Compute doublet scores and predict doublets
+    doublet_scores, predicted_doublets = scrub.scrub_doublets()
+
+    # Annotate the AnnData object with doublet scores and predictions
+    adata.obs['doublet_scores'] = doublet_scores
+    adata.obs['predicted_doublets'] = predicted_doublets
+
+    return adata
+# ------------------------------------------
+def mitochondrial_genes_removal(adata: AnnData) -> Tuple[AnnData, int]:
+    """
+    Removes cells based on mitochondrial gene content and gene count quantiles from an AnnData object.
+
+    This function annotates mitochondrial genes, calculates quality control metrics, and filters
+    cells that have an unusually high or low number of genes based on specified quantiles, as well
+    as cells with a high percentage of mitochondrial genes. It modifies the input AnnData object in place,
+    adding annotations for mitochondrial gene filtering and quantile-based gene count filtering.
+
+    Parameters:
+    - adata (AnnData): The single-cell data to be filtered. It is modified in place.
+
+    Returns:
+    - Tuple[AnnData, int]: A tuple containing the filtered AnnData object and the number of cells filtered out.
+
+    Raises:
+    - ValueError: If `adata` is not an instance of AnnData.
+
+    """
+
+    if not isinstance(adata, AnnData):
+        raise ValueError("The input data must be an AnnData object.")
+
+    UPPER_QUANTILE = 0.98
+    LOWER_QUANTILE = 0.02
+    MT_COUNT_LIMIT = 40
+
+    # Count the number of cells before filtering
+    num_cells_before = adata.n_obs
+
+    # Annotate mitochondrial genes
+    adata.var['mt'] = adata.var_names.str.contains('^MT-', case=False, regex=True)
+
+    # Calculate QC metrics for mitochondrial genes
+    sc.pp.calculate_qc_metrics(adata, qc_vars=['mt'], percent_top=None, log1p=False, inplace=True)
+
+    # Determine upper and lower limits for gene counts
+    upper_lim = np.quantile(adata.obs.n_genes_by_counts.values, UPPER_QUANTILE)
+    lower_lim = np.quantile(adata.obs.n_genes_by_counts.values, LOWER_QUANTILE)
+    print(f'Gene count quantile limits: {lower_lim} to {upper_lim}')
+
+    # Filter cells based on gene count quantiles
+    quantile_obs_title = f'{UPPER_QUANTILE}%_quantiles_{LOWER_QUANTILE}%'
+    adata.obs[quantile_obs_title] = (adata.obs.n_genes_by_counts < upper_lim) & (adata.obs.n_genes_by_counts > lower_lim)
+
+    # Filter cells based on mitochondrial gene count percentage
+    mito_obs_title = f'mitochondrial_genes_<{MT_COUNT_LIMIT}_pct_count'
+    adata.obs[mito_obs_title] = adata.obs.pct_counts_mt < MT_COUNT_LIMIT
+
+    # Calculate the number of filtered cells
+    num_filtered = num_cells_before - adata.n_obs
+
+    return adata, num_filtered
+# ------------------------------------------
+def ribo_genes_removal(adata_original: AnnData) -> tuple[AnnData, int]:
+    """
+    Removes ribosomal genes from the dataset and filters cells based on gene count quantiles.
+
+    This function copies the original AnnData object, identifies ribosomal genes,
+    and filters out cells with extreme gene counts based on the specified upper and
+    lower quantiles. It also filters cells based on the percentage of ribosomal genes.
+
+    Parameters:
+    - adata_original: AnnData
+        The original single-cell dataset contained in an AnnData object.
+
+    Returns:
+    - tuple[AnnData, int]
+        A tuple containing the filtered AnnData object and the number of cells filtered.
+    """
+    # Constants for filtering criteria
+    UPPER_QUANTILE = 0.98
+    LOWER_QUANTILE = 0.02
+    RIBO_COUNT_LIMIT = 2
+    RIBOSOME_GENES_TITLE = 'ribo'
+    
+    # Copy the input dataset to avoid modifying the original
+    adata = adata_original.copy()
+
+    # Initial counts of cells and genes
+    num_cells_before = adata.n_obs
+    num_genes_before = adata.n_vars
+
+    # Load ribosomal genes from a predefined list
+    ribo_genes = pd.read_table('RIBO_LOOKUP_FILE_PATH', skiprows=2, header=None)
+    adata.var[RIBOSOME_GENES_TITLE] = adata.var_names.isin(ribo_genes[0].values)
+    
+    # Calculate quality control metrics
+    sc.pp.calculate_qc_metrics(adata, qc_vars=[RIBOSOME_GENES_TITLE], percent_top=None, log1p=False, inplace=True)
+    
+    # Sort values for gene count quantile calculation
+    adata.var.sort_values('n_cells_by_counts')
+    adata.obs.sort_values('n_genes_by_counts')
+
+    # Calculate upper and lower limits for gene counts
+    upper_lim = np.quantile(adata.obs['n_genes_by_counts'].values, UPPER_QUANTILE)
+    lower_lim = np.quantile(adata.obs['n_genes_by_counts'].values, LOWER_QUANTILE)
+    print(f'{lower_lim} to {upper_lim}')
+
+    # Filter cells based on ribosomal gene count percentage
+    ribosome_genes_title = f'pct_counts_{RIBOSOME_GENES_TITLE}'
+    adata.obs[f'{RIBOSOME_GENES_TITLE}_<{RIBO_COUNT_LIMIT}_pct_count'] = adata.obs[ribosome_genes_title] < RIBO_COUNT_LIMIT
+    
+    # Count and calculate the number of cells after filtering
+    num_cells_after = adata.n_obs
+    num_filtered = num_cells_before - num_cells_after
+
+    return adata, num_filtered
+
+# ------------------------------------------
+import anndata as ad
+import scvi
+import pandas as pd
+
+def doublet_removal(adata_original: ad.AnnData) -> tuple[ad.AnnData, int]:
+    """
+    Removes doublet cells from an AnnData object using the scVI and SOLO models for doublet prediction.
+
+    Parameters:
+    - adata_original (ad.AnnData): The original AnnData object containing the single-cell RNA sequencing data.
+
+    Returns:
+    - tuple[ad.AnnData, int]: A tuple containing the AnnData object after doublet removal and the number of detected doublets.
+    
+    This function first identifies highly variable genes, then uses scVI to model the data,
+    and finally applies the SOLO model to predict doublets. Cells predicted as doublets with
+    a significant difference in prediction scores are removed from the dataset.
+    """
+    DOUBLETS_PREDICTION = 'prediction'    
+    SINGLET = 'singlet'
+
+    adata = adata_original.copy()
+    adata_doublets = adata_original.copy()
+    
+    # Identify highly variable genes
+    scvi.data.setup_anndata(adata, layer="counts")
+    sc.pp.highly_variable_genes(
+        adata,
+        n_top_genes=3000,
+        subset=True,
+        flavor="seurat_v3"
+    )
+    
+    # Model to predict doublets using scVI
+    scvi.model.SCVI.setup_anndata(adata)
+    doublets_model = scvi.model.SCVI(adata) 
+    doublets_model.train()
+    
+    # Pass the scVI model to the SOLO model for doublet detection
+    solo = scvi.external.SOLO.from_scvi_model(doublets_model)
+    solo.train()
+    
+    # Convert doublet predictions to a DataFrame
+    df = solo.predict()
+    df[DOUBLETS_PREDICTION] = solo.predict(soft=False)
+
+    # Fine-tune doublet labeling by deleting records with a significant difference in prediction scores
+    df['dif'] = df.doublet - df.singlet
+    doublets = df[(df.prediction == DOUBLETS_PREDICTION) & (df.dif > 1)]
+    adata_doublets.obs[DOUBLETS_PREDICTION] = adata_doublets.obs.index.isin(doublets.index)
+    
+    # Count the number of detected doublets
+    number_of_doublets = len(doublets)
+
+    return adata_doublets, number_of_doublets
+
+# ------------------------------------------
+def poor_cell_and_gene_removal(adata: AnnData) -> Tuple[AnnData, int, int]:
+    """
+    Removes cells with fewer than a specified number of genes and genes present in fewer than a specified number of cells.
+
+    This function filters out low-quality cells and genes from an AnnData object based on specified thresholds. It is designed to improve the quality of the dataset for further analysis.
+
+    Parameters:
+    - adata (AnnData): The AnnData object containing single-cell gene expression data.
+
+    Returns:
+    - Tuple[AnnData, int, int]: A tuple containing the filtered AnnData object, the number of cells removed, and the number of genes removed.
+    
+    """
+    # Count the number of cells and genes before filtering
+    num_cells_before = adata.n_obs
+    num_genes_before = adata.n_vars
+
+    # Filter out cells with fewer than 200 genes and genes found in fewer than 100 cells
+    sc.pp.filter_cells(adata, min_genes=200)
+    sc.pp.filter_genes(adata, min_cells=100)
+
+    # Count the number of cells and genes after filtering
+    num_cells_after = adata.n_obs
+    num_genes_after = adata.n_vars
+
+    # Calculate the number of cells and genes removed
+    num_cells_removed = num_cells_before - num_cells_after
+    num_genes_removed = num_genes_before - num_genes_after
+
+    return adata, num_cells_removed, num_genes_removed
+
+# ------------------------------------------
+from anndata import AnnData
+import pandas as pd
+import scanpy as sc
+
+def sum_duplicate_genes(adata: AnnData, sample_name: str) -> AnnData:
+    """
+    Sum the expression values of duplicate gene names in an AnnData object and return a new AnnData object with unique gene names.
+
+    This function addresses the issue of duplicate gene names by summing their expression values across all samples. It ensures that the resulting AnnData object contains unique gene names, making it suitable for further analysis. Metadata from the original AnnData object, such as observation (obs) data, is preserved in the new object. If duplicate gene names persist after the operation, an exception is raised.
+
+    Parameters:
+    - adata (AnnData): The input AnnData object containing gene expression data, potentially with duplicate gene names.
+    - sample_name (str): A string representing the name of the sample being processed. Used in error messages to indicate the sample with duplicate genes post-processing.
+
+    Returns:
+    - AnnData: A new AnnData object with summed expression values for duplicate genes, resulting in unique gene names.
+
+    Raises:
+    - Exception: If duplicate gene names are found in the resulting AnnData object, indicating that the summing operation did not resolve all duplicates.
+    """
+    # Convert AnnData to DataFrame for processing
+    df = pd.DataFrame(adata.X.toarray().T, index=adata.var_names, columns=adata.obs_names)
+
+    # Sum expression values for genes with the same name
+    df_summed = df.groupby(df.index).sum()
+
+    # Convert the summed DataFrame back into an AnnData object
+    adata_unique = sc.AnnData(df_summed.T)
+
+    # Copy metadata from the original AnnData object to preserve observation data
+    adata_unique.obs = adata.obs.copy()
+
+    # Check for duplicate gene names in the new AnnData object
+    gene_counts = adata_unique.var_names.value_counts()
+    if len(gene_counts[gene_counts > 1]) > 0:
+        raise Exception(f"Error: Duplicate gene names found in the processed sample '{sample_name}'. Please check the data.")
+
+    return adata_unique
+
+# ------------------------------------------
+def Find_Metadata(df: DataFrame, sample_name: str, metadata_title: str) -> str:
+    """
+    Retrieves specific metadata for a given sample from a pandas DataFrame.
+
+    This function searches the DataFrame for rows matching the specified sample name,
+    then extracts and returns the desired piece of metadata from the first matching row.
+    Assumes all matching rows contain duplicate information and only processes the first match.
+
+    Parameters:
+    - df (DataFrame): The pandas DataFrame containing sample metadata.
+    - sample_name (str): The name of the sample to search for within the DataFrame.
+    - metadata_title (str): The title of the metadata column from which to extract information.
+
+    Returns:
+    - str: The metadata of interest for the specified sample. Returns 'None' if the sample or metadata is not found.
+
+    Note:
+    - The function is designed to work with DataFrames where each row represents a sample and columns represent metadata fields.
+    - It's assumed that the 'Internal Package ID' column is used to identify samples.
+    """
+    SAMPLE_OF_INTEREST_COLUMN_TITLE = 'Internal Package ID'
+    
+    # Find all rows matching the specified sample name and fill missing values with 'None'
+    sample_rows = df[df[SAMPLE_OF_INTEREST_COLUMN_TITLE].astype(str).str.contains(sample_name, na=False)].fillna('None')
+    
+    # Fetch the first matching row as all others are considered duplicates
+    sample_row = sample_rows.iloc[0]
+    
+    # Extract and return the requested metadata
+    metadata_of_interest = sample_row[metadata_title]
+    print(metadata_of_interest)
+    return metadata_of_interest
+
+# ------------------------------------------
+from typing import Tuple
+from anndata import AnnData
+from pathlib import Path
+import pandas as pd
+import scanpy as sc
+from scipy.sparse import csr_matrix
+import csv
+import os
+from datetime import datetime
+
+def process_sample(data_location: str, sample_name: str) -> AnnData:
+    """
+    Processes a single-cell RNA sequencing sample, performing various preprocessing steps 
+    including doublet detection, poor cell and gene removal, mitochondrial and ribosomal gene removal. 
+    It also annotates the AnnData object with sample metadata and writes processing information to a CSV file.
+
+    Parameters:
+    - data_location (str): The file path to the input data in .h5 format.
+    - sample_name (str): The name of the sample being processed.
+
+    Returns:
+    - AnnData: The processed AnnData object with cells and genes filtered, and metadata annotations added.
+
+    Raises:
+    - Exception: If there are issues in doublet detection or other preprocessing steps, an error is logged with details.
+
+    Note:
+    - This function assumes the existence of several globally defined variables such as `KPMP_EXCEL_LEGEND_PATH` 
+      and `CVS_FILE_PATH`, which should be set before calling this function.
+    - It uses external functions like `sum_duplicate_genes`, `doublet_removal`, `detect_doublets`, 
+      `poor_cell_and_gene_removal`, `mitochondrial_genes_removal`, `ribo_genes_removal`, and `Find_Metadata` 
+      which should be defined elsewhere in the codebase.
+    - It also assumes the existence of a specific Excel file for metadata and writes processing results to a CSV file.
+    """
+    # Initialize counters for the number of cells/genes removed
+    num_cells_removed = 0
+    num_genes_removed = 0
+    mito_genes_removed_count = 0
+    ribo_genes_removed_count = 0
+    doublets_removed_count = 0
+
+    # Define the headers for the CSV file
+    headers = ["sample_name", "doublets_labeled", "cells<200_labeled", "genes<3_labeled",      
+               "mitochondrial_labeled", "ribo_labeled", "Sample_Status", "Sample_Type",
+               "Sample_Tissue_Type", "Sample_Sex", "Sample_Age", "Sample_Race", "Time_Elapsed"]
+
+    start_time = datetime.now()
+    Metadata_df = pd.read_excel(KPMP_EXCEL_LEGEND_PATH, engine='openpyxl')
+
+    adata = sc.read_10x_h5(data_location)
+    # Sum duplicate gene counts
+    adata.var_names = adata.var_names.str.upper()
+    adata = sum_duplicate_genes(adata, sample_name)
+    # Doublet detection
+    try:
+        print('Doublet detection using scVI SOLO')
+        adata, doublets_removed_count = doublet_removal(adata)    
+    except Exception as e:
+        logging.error(f"Error doublet (SOLO) processing sample {sample_name}: {e}")  
+        try:
+            adata = detect_doublets(adata)
+        except Exception as e:
+            logging.error(f"Error doublet (scrublet) processing sample {sample_name}: {e}")  
+
+    adata, num_cells_removed, num_genes_removed = poor_cell_and_gene_removal(adata)
+    adata, mito_genes_removed_count = mitochondrial_genes_removal(adata)
+    adata, ribo_genes_removed_count = ribo_genes_removal(adata)
+
+    # Annotate the AnnData object with sample metadata
+    Sample_Status = Find_Metadata(Metadata_df, sample_name, 'Status')
+    Sample_Type = Find_Metadata(Metadata_df, sample_name, 'Sample Type_y')
+    Sample_Tissue_Type = Find_Metadata(Metadata_df, sample_name, 'Tissue Type_y')
+    Sample_Gender = Find_Metadata(Metadata_df, sample_name, 'Sex')
+    Sample_Age = Find_Metadata(Metadata_df, sample_name, 'Age (Years) (Binned)')
+    Sample_Race = Find_Metadata(Metadata_df, sample_name, 'Race')
+
+    adata.obs['Sample_Name'] = sample_name.strip()
+    adata.obs['Sample_Status'] = Sample_Status
+    adata.obs['Sample_Type'] = Sample_Type
+    adata.obs['Sample_Tissue_Type'] = Sample_Tissue_Type
+    adata.obs['Sample_Sex'] = Sample_Gender
+    adata.obs['Sample_Age'] = Sample_Age
+    adata.obs['Sample_Race'] = Sample_Race
+
+    end_time = datetime.now()
+    time_taken = (end_time - start_time).total_seconds()
+    # Calculate hours and minutes for the processing time
+    hours = int(time_taken // 3600)
+    minutes = int((time_taken % 3600) // 60)
+
+    # Prepare data for the CSV
+    data_for_csv = [sample_name, doublets_removed_count, num_cells_removed, num_genes_removed,
+                    mito_genes_removed_count, ribo_genes_removed_count, Sample_Status, Sample_Type,
+                    Sample_Tissue_Type, Sample_Gender, Sample_Age, Sample_Race, f'{hours}:{minutes}']
+
+    # Check if the CSV file exists and write headers if it doesn't
+    if not os.path.isfile(CVS_FILE_PATH):
+        with open(CVS_FILE_PATH, 'w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(headers)
+
+    # Append the data to the CSV file
+    with open(CVS_FILE_PATH, 'a', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(data_for_csv)
+
+    output_file = Path(str(data_location)+'_preprocessing-filtered').with_suffix('.h5ad')
+    adata.X = csr_matrix(adata.X)
+    # Check if the file exists and then delete it
+    if output_file.exists():
+        output_file.unlink()
+    adata.write_h5ad(output_file, compression='gzip')
+
+    return adata
+
+# ------------------------------------------
+def read_and_process_data(sample_name: str, root_path: Path, data_dir: str, source_data_path: Path) -> AnnData:
+    """
+    Reads and processes single-cell data for a given sample.
+
+    This function constructs the path to the sample data using the provided root path, data directory, 
+    and sample name. It then processes the sample by calling `process_sample` and returns the processed 
+    AnnData object. If an error occurs during processing, logs the error and returns None.
+
+    Parameters:
+    - sample_name (str): The name of the sample to process.
+    - root_path (Path): The root path to the base directory where data is stored.
+    - data_dir (str): The directory under the root path where sample directories are located.
+    - source_data_path (Path): The relative path to the source data file from the sample directory. 
+      The actual file used will have a `.h5` suffix.
+
+    Returns:
+    - anndata.AnnData or None: The processed AnnData object if successful, None otherwise.
+
+    Raises:
+    - Logs an error message if any exception occurs during processing.
+    """
+    try:
+        data_location = root_path / Path(data_dir) / Path(sample_name.strip()) / source_data_path.with_suffix('.h5')
+        adata = process_sample(data_location, sample_name)
+        return adata
+    except Exception as e:
+        logging.error(f"Error processing sample {sample_name}: {e}")
+        return None
+
+# ------------------------------------------   
+def find_subdirectories(root_path: Path) -> List[str]:
+    """
+    Finds and lists the names of subdirectories that contain a specific target directory 
+    within a given root directory. This function is particularly tailored to search for 
+    sample names based on a directory structure convention where sample names are 
+    positioned immediately before a 'cellranger_output' directory.
+
+    Parameters:
+    - root_path (Path): The root directory path from which to start the search. This should 
+      be a Path object representing the top-level directory.
+
+    Returns:
+    - List[str]: A list of sample names extracted from the directory paths that contain 
+      the target 'cellranger_output' directory.
+    """
+    target_path = 'cellranger_output'
+    sample_names = []
+
+    for path in root_path.rglob(target_path):
+        # Assuming sample name is the directory immediately before 'cellranger_output'
+        sample_name = path.parts[-2]
+        sample_names.append(sample_name)
+
+    return sample_names
+
+# ------------------------------------------  
+if __name__ == "__main__":
+    # Set the normalization scale and seed for reproducibility
+    NORMALIZATION_SCALE = 1e4
+    scvi.settings.seed = 0
+
+    print(f"Last run with scvi-tools version: {scvi.__version__}")
+
+    # Set default figure parameters and higher precision for float32 matrix multiplication
+    sc.set_figure_params(figsize=(4, 4))
+    torch.set_float32_matmul_precision("high")
+
+    # Create a temporary directory to save intermediate results
+    save_dir = tempfile.TemporaryDirectory()
+
+    # Initialize lists to track samples and their processing status
+    adata_array:  List[sc.AnnData] = []
+    sample_names: List[str]        = find_subdirectories(SAMPLES_OF_INTEREST_DIR)
+
+    completed_samples = 0
+    total_samples     = len(sample_names)
+
+    # Remove existing sample tracker log, if any
+    if CVS_FILE_PATH.exists():
+        CVS_FILE_PATH.unlink()
+
+    # -------------------------------
+    # Comment line before after done testing!!!
+    # sample_names=[sample_names[0]]
+    # sample_names=sample_names[10:11]   
+    # sample_names = ['0044386a-dca1-4f8d-9394-60409f6956d8']
+    # adata=read_and_process_data('1b487afa-ac6f-4cda-996b-c943e082b5f1', root_path, data_dir, source_data_path)
+    # adata=read_and_process_data(sample_names[0], root_path, data_dir, source_data_path)
+    # sample_names = ['3f79f07f-c357-44a3-866e-1999820ab445', \
+    #                 'e048e99c-c18c-44b8-9c1f-db9730f1f240', \
+    #                 '3e436c7a-542e-4980-b52e-92d5d4bca496', \
+    #                 '99faf665-3081-4c2f-9f25-866ff52cfc98', \
+    #                 'a797d182-005c-41e5-a6dd-3c0f0badce95', \
+    #                 'a84202f7-b01c-4831-9e14-7a9261d96afa', \
+    #                 'faf11845-5073-4451-850c-5ed537e601c4', \
+    #                 'fce6b986-e65e-45af-a148-a18deac621dd', \
+    #                 '1b487afa-ac6f-4cda-996b-c943e082b5f1' \
+    #                 ]
+    # -------------------------------        
+
+    # Process samples concurrently to improve efficiency
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = []
+        for sample_name in sample_names:
+            logging.info("----------------------------------------------")
+            logging.info(f"Starting processing for sample: {sample_name} ({len(futures) + 1}/{total_samples})")
+            future = executor.submit(read_and_process_data, sample_name, root_path, data_dir, source_data_path)
+            futures.append(future)
+
+        for future in concurrent.futures.as_completed(futures):
+            result = future.result()
+            completed_samples += 1
+            if result is not None:
+                adata_array.append(result)
+                logging.info("----------------------------------------------")
+                logging.info(f"Completed processing sample {completed_samples} of {total_samples}")
+                logging.info("----------------------------------------------")
+            else:
+                logging.error(f"A sample failed to process or returned no data ({completed_samples}/{total_samples})")
+
+    # Concatenate results from all samples into a single AnnData object
+    logging.info(f"Concatenating {total_samples} samples")
+    adata = sc.concat(adata_array, index_unique='_')
+    
+    # Ensure the data matrix is stored in a compressed sparse row format for efficiency
+    adata.X = csr_matrix(adata.X)
+
+    # Save the combined dataset to a file, overwriting if it already exists
+    result_file = root_path / Path(data_dir) / 'combined.h5ad'
+    if result_file.exists():
+        result_file.unlink()
+    adata.write_h5ad(result_file)
+
+    print('Done')
+
+
